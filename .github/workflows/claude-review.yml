@@ -13,39 +13,32 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 运行 AI 代码审查
-        id: review
+      - name: 获取代码变更
+        id: diff
+        run: |
+          git fetch origin main --depth=1
+          echo "DIFF<<DIFF_EOF" >> $GITHUB_OUTPUT
+          git diff origin/main...HEAD >> $GITHUB_OUTPUT
+          echo "DIFF_EOF" >> $GITHUB_OUTPUT
+
+      - name: 运行 AI 审查
         env:
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          git fetch origin main --depth=1
-          DIFF_CONTENT=$(git diff origin/main...HEAD)
-          BASE64_DIFF=$(echo "$DIFF_CONTENT" | base64 -w0)
-          RESPONSE=$(curl -s https://api.modelscope.cn/v1/chat/completions \
+          curl -s https://api.modelscope.cn/v1/chat/completions \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"model\": \"Qwen/Qwen2.5-Coder-32B-Instruct\",
-              \"messages\": [
-                {\"role\": \"system\", \"content\": \"检查代码变更中的bug、安全问题、代码质量问题、缺少类型标注。用中文回复。\"},
-                {\"role\": \"user\", \"content\": \"审查代码变更：\n\`\`\`diff\n$(echo \"$DIFF_CONTENT\" | head -200)\n\`\`\`\"}
+            -d '{
+              "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+              "messages": [
+                {"role":"system","content":"审查代码变更，找出bug、安全问题、代码质量问题。用中文。"},
+                {"role":"user","content":"审查代码变更：${{ steps.diff.outputs.DIFF }}"}
               ],
-              \"temperature\": 0.1,
-              \"max_tokens\": 2000
-            }")
-          echo "result<<EOF" >> $GITHUB_OUTPUT
-          echo "$RESPONSE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+              "temperature": 0.1,
+              "max_tokens": 2000
+            }' > /tmp/review_response.json
 
-      - name: 显示审查结果
+      - name: 生成审查报告
         run: |
-          echo '## 🤖 AI 代码审查结果' >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.review.outputs.result }}' | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-c=d.get('choices',[{}])[0].get('message',{}).get('content','')
-print(c)
-" >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '---' >> $GITHUB_STEP_SUMMARY
-          echo '✅ 自动审查完成' >> $GITHUB_STEP_SUMMARY
+          echo "## 🤖 AI 自动代码审查" >> $GITHUB_STEP_SUMMARY
+          python3 review_formatter.py >> $GITHUB_STEP_SUMMARY
