@@ -1,9 +1,10 @@
 name: AI 自动代码审查
 on:
-  pull_request:
-    types: [opened, synchronize]
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -11,49 +12,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 获取代码变更
-        id: diff
+
+      - name: 运行 AI 代码审查
+        id: review
+        env:
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           git fetch origin main --depth=1
-          DIFF=$(git diff origin/main...HEAD)
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "diff<<$EOF" >> $GITHUB_OUTPUT
-          echo "$DIFF" >> $GITHUB_OUTPUT
-          echo "$EOF" >> $GITHUB_OUTPUT
-      - name: AI 代码审查
-        id: review
-        run: |
-          MODELSCOPE_KEY="${{ secrets.ANTHROPIC_API_KEY }}"
-          RESPONSE=$(curl -s -w "\n%{http_code}" https://api.modelscope.cn/v1/chat/completions \
-            -H "Authorization: Bearer $MODELSCOPE_KEY" \
+          DIFF_CONTENT=$(git diff origin/main...HEAD)
+          BASE64_DIFF=$(echo "$DIFF_CONTENT" | base64 -w0)
+          RESPONSE=$(curl -s https://api.modelscope.cn/v1/chat/completions \
+            -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
-            -d '{
-              "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
-              "messages": [
-                {"role": "system", "content": "你是代码审查助手。检查以下代码变更，找出：1) 明显 bug 2) 安全问题 3) 代码质量问题 4) 缺少类型标注。用中文回复，给出具体修改建议。"},
-                {"role": "user", "content": "审查以下代码变更：\n```diff\n${{ steps.diff.outputs.diff }}\n```"}
+            -d "{
+              \"model\": \"Qwen/Qwen2.5-Coder-32B-Instruct\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"检查代码变更中的bug、安全问题、代码质量问题、缺少类型标注。用中文回复。\"},
+                {\"role\": \"user\", \"content\": \"审查代码变更：\n\`\`\`diff\n$(echo \"$DIFF_CONTENT\" | head -200)\n\`\`\`\"}
               ],
-              "temperature": 0.1,
-              "max_tokens": 2000
-            }')
-          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          echo "status=$HTTP_CODE" >> $GITHUB_OUTPUT
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$HTTP_BODY" >> $GITHUB_OUTPUT
+              \"temperature\": 0.1,
+              \"max_tokens\": 2000
+            }")
+          echo "result<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESPONSE" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-      - name: 输出审查结果
+
+      - name: 显示审查结果
         run: |
-          echo "## 代码审查结果" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.review.outputs.body }}' | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-try:
-    if "choices" in data and len(data["choices"]) > 0:
-        print(data["choices"][0]["message"]["content"])
-    else:
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-except Exception as e:
-    print(str(e))
-    print(sys.stdin.read())
-' >> $GITHUB_STEP_SUMMARY
+          echo '## 🤖 AI 代码审查结果' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.review.outputs.result }}' | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+c=d.get('choices',[{}])[0].get('message',{}).get('content','')
+print(c)
+" >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '---' >> $GITHUB_STEP_SUMMARY
+          echo '✅ 自动审查完成' >> $GITHUB_STEP_SUMMARY
