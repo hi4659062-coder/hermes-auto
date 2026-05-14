@@ -1,4 +1,4 @@
-name: Claude Code 自动审查
+name: AI 自动代码审查
 on:
   pull_request:
     types: [opened, synchronize]
@@ -9,15 +9,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: 安装 Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code --unsafe-perm
-      - name: Claude Code 审查
+          fetch-depth: 0
+      - name: 获取代码变更
+        id: diff
         run: |
           git fetch origin main --depth=1
-          git diff origin/main...HEAD | claude -p "审查以下代码变更，检查：1) 明显 bug 2) 安全问题 3) Python 风格 4) 缺少类型标注。用中文回复，给出修改建议。" --max-turns 3
-        env:
-          ANTHROPIC_BASE_URL: https://api.modelscope.cn/v1
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DIFF=$(git diff origin/main...HEAD)
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "diff<<$EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+      - name: AI 代码审查
+        id: review
+        run: |
+          MODELSCOPE_KEY="${{ secrets.ANTHROPIC_API_KEY }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" https://api.modelscope.cn/v1/chat/completions \
+            -H "Authorization: Bearer $MODELSCOPE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+              "messages": [
+                {"role": "system", "content": "你是代码审查助手。检查以下代码变更，找出：1) 明显 bug 2) 安全问题 3) 代码质量问题 4) 缺少类型标注。用中文回复，给出具体修改建议。"},
+                {"role": "user", "content": "审查以下代码变更：\n```diff\n${{ steps.diff.outputs.diff }}\n```"}
+              ],
+              "temperature": 0.1,
+              "max_tokens": 2000
+            }')
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          echo "status=$HTTP_CODE" >> $GITHUB_OUTPUT
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$HTTP_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: 输出审查结果
+        run: |
+          echo "## 代码审查结果" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.review.outputs.body }}' | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+try:
+    if "choices" in data and len(data["choices"]) > 0:
+        print(data["choices"][0]["message"]["content"])
+    else:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+except Exception as e:
+    print(str(e))
+    print(sys.stdin.read())
+' >> $GITHUB_STEP_SUMMARY
